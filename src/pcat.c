@@ -245,6 +245,10 @@ int main(int argc, char* argv[])
             }
         }
     }
+    free(buffer_positions);
+    free(buffer_sizes);
+    free(buffers);
+    free(fds);
 
     debug(1, "Success.\n");
     return 0;

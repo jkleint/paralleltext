@@ -52,7 +52,15 @@ done
 for ((len=0; len < $max_line_len; len++)); do printf '%*s\n' $len; done | "$pcat" | gzip > "$output"
 for ((len=0; len < $max_line_len; len++)); do printf '%*s\n' $len; done | "$pcat" | cmp - <(zcat "$output")
 
-# TODO: Test reallyreally long lines.
+# Test really long lines, and binary zeros.
+nlines=5
+for ((n=0 ; n < $nlines ; n++)); do 
+    dd if=/dev/zero bs=1k count=$RANDOM 2>/dev/null 
+    dd if=/dev/zero bs=1  count=$RANDOM 2>/dev/null     # Want to get a length that's not always multiple of blocksize, but bs=1 is slooow
+    echo 
+done > "${files[0]}"
+"$pcat" "${files[0]}" > "$output"
+cmp <(sort "${files[0]}") <(sort "$output")
 
 # Clean up.
 rm "${files[@]}" "$output"
