@@ -14,11 +14,17 @@ all: bin/pcat bin/hsplit
 bin:
 	mkdir bin
 
-bin/pcat: bin src/pcat.c
-	$(CC) $(CFLAGS) src/pcat.c -o bin/pcat
+bin/pcat: bin src/pcat.c bin/ptp.o
+	$(CC) $(CFLAGS) src/pcat.c bin/ptp.o -o bin/pcat
 
-bin/hsplit: bin src/hsplit.c src/murmurhash3.c src/murmurhash3.h
-	$(CC) $(CFLAGS) src/hsplit.c src/murmurhash3.c -o bin/hsplit
+bin/hsplit: bin src/hsplit.c bin/ptp.o bin/murmurhash3.o
+	$(CC) $(CFLAGS) src/hsplit.c bin/murmurhash3.o bin/ptp.o -o bin/hsplit
+
+bin/ptp.o: bin src/ptp.[ch]
+	$(CC) $(CFLAGS) -c src/ptp.c -o bin/ptp.o
+
+bin/murmurhash3.o: bin src/murmurhash3.[ch]
+	$(CC) $(CFLAGS) -c src/murmurhash3.c -o bin/murmurhash3.o
 
 test: bin/pcat bin/hsplit
 	test/test-pcat.sh

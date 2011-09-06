@@ -16,10 +16,20 @@
 #include <string.h>
 #include <stdint.h>
 #include <limits.h>
+#include <assert.h>
+
+#include "ptp.h"
 #include "murmurhash3.h"
 
 
 #define HASH_SEED    (0x5ca1ab1e)
+
+
+/* Holds the output FILE pointers.  */
+struct fileinfo {
+    unsigned int numfiles;
+    FILE ** files;
+};
 
 
 void printusage()
@@ -28,6 +38,9 @@ void printusage()
         "Usage: hsplit [OPTION]... [FILE]...\n"
         "Distribute lines of standard input evenly among FILE(s), such that identical\n"
         "lines end up in the same FILE.\n\n"
+
+        "Lines in any particular output FILE will have the same order they did in the\n"
+        "input.  hsplit does not add a final newline if the input lacks one.\n\n"
 
         "With no FILE(s), print the 32-bit unsigned integer hash code for each input\n"
         "line to standard output.\n\n"
@@ -65,6 +78,46 @@ unsigned int hash2filenum(uint32_t hashcode, unsigned int numfiles)
 }
 
 
+/** Given a buffer of one or more lines, hash each line and write it to the appropriate file.
+ * info is actually a struct fileinfo.  If info.numfiles == 0, write the hashcode to
+ * stdout instead.  buflen is guaranteed to be at least 1, and buf will end with
+ * a newline or the last byte of the file.
+ */
+void split_lines_to_files(char * buf, size_t buflen, void * info)
+{
+    const char * line = buf;
+    const char * bufend = buf + buflen;
+    const char * newline;
+    struct fileinfo fileinfo = *(struct fileinfo *) info;
+
+    assert(buflen > 0);
+    while (line < bufend)
+    {
+        newline = memchr(line, '\n', bufend - line);
+        if (newline == NULL)
+            newline = bufend - 1;       // We add one later when writing to include the newline in the usual case.
+        uint32_t hashcode = hash(line, newline - line);
+
+        if (fileinfo.numfiles > 0)
+        {
+            unsigned int filenum = hash2filenum(hashcode, fileinfo.numfiles);
+            // fwrite(3) is faster than write(2) here because we're only writing a line at a time, so fwrite's buffering helps.
+            if (fwrite(line, 1, newline - line + 1, fileinfo.files[filenum]) < newline - line + 1)
+            {
+                fprintf(stderr, "hsplit: Error writing to file %d", filenum);
+                perror("");
+                exit(1);
+            }
+        }
+        else
+        {
+            printf("%u\n", hashcode);
+        }
+        line = newline + 1;
+    }
+}
+
+
 /**
  * Hash lines from stdin to files given on command line.
  */
@@ -72,9 +125,8 @@ int main(int argc, char * argv[])
 {
     int append = 0;
     int first_filename_arg = 1;
-    size_t linebuf_size = -1;
-    ssize_t bytesread;
-    char * linebuf = NULL;
+    process_lines_context ctx;
+    struct fileinfo fileinfo;
 
     if (argc >= 2 && (strcmp(argv[1], "--help") == 0 || strcmp(argv[1], "-h") == 0))
     {
@@ -88,26 +140,26 @@ int main(int argc, char * argv[])
         first_filename_arg = 2;
     }
 
-    unsigned int numfiles = argc - first_filename_arg;
-    if (numfiles == 0 && append)
+    fileinfo.numfiles = argc - first_filename_arg;
+    if (fileinfo.numfiles == 0 && append)
     {
         fprintf(stderr, "Can only use --append with files.");
         exit(1);
     }
 
-    FILE ** files = calloc(numfiles, sizeof (FILE *));
-    if (numfiles > 0 && files == NULL)
+    fileinfo.files = calloc(fileinfo.numfiles, sizeof (FILE *));
+    if (fileinfo.numfiles > 0 && fileinfo.files == NULL)
     {
         perror("hsplit: Error allocating memory");
         exit(1);
     }
 
     /* Open files. */
-    for (unsigned int f = 0 ; f < numfiles ; f++)
+    for (unsigned int f = 0 ; f < fileinfo.numfiles ; f++)
     {
         const char * filename = argv[first_filename_arg + f];
-        files[f] = fopen(filename, append ? "a" : "w");
-        if (files[f] == NULL)
+        fileinfo.files[f] = fopen(filename, append ? "a" : "w");
+        if (fileinfo.files[f] == NULL)
         {
             fprintf(stderr, "hsplit: error opening \"%s\"", filename);
             perror("");
@@ -115,40 +167,35 @@ int main(int argc, char * argv[])
         }
     }
 
-    // TODO: If murmurhash had an incremental interface, we could probably do this faster, with less memory.
-    /* Loop: read a line, hash to get file number, write. */
-    while ((bytesread = getline(&linebuf, &linebuf_size, stdin)) >= 0)
+    if (process_lines_init(&ctx, fileno(stdin), split_lines_to_files, &fileinfo) != 0)
     {
-
-        uint32_t hashcode = hash(linebuf, bytesread);
-
-        if (numfiles > 0)
-        {
-            unsigned int filenum = hash2filenum(hashcode, numfiles);
-            if (fwrite(linebuf, 1, bytesread, files[filenum]) < bytesread)
-            {
-                fprintf(stderr, "hsplit: Error writing to file %d", filenum);
-                perror("");
-                exit(1);
-            }
-        }
-        else
-        {
-            printf("%u\n", hashcode);
-        }
+        perror("hsplit");
+        exit(1);
     }
 
-    /* Close files. */
-    for (int f = 0 ; f < numfiles ; f++)
+    /* Loop: read a line, hash to get file number, write. */
+    // TODO: If our hash function had an incremental interface, we could probably do this faster, without buffering.
+    int result;
+    do {
+        result = process_lines(&ctx);
+    } while (result == 0);
+    if (result > 0)
     {
-        if (fclose(files[f]) != 0)
+        perror("hsplit");
+        exit(1);
+    }
+
+    /* Close files and clean up. */
+    process_lines_cleanup(&ctx);
+    for (int f = 0 ; f < fileinfo.numfiles ; f++)
+    {
+        if (fclose(fileinfo.files[f]) != 0)
         {
             perror("hsplit: Error closing file");
             exit(1);
         }
     }
-    free(linebuf);
-    free(files);
+    free(fileinfo.files);
 
     return 0;
 }

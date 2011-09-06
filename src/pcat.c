@@ -19,6 +19,7 @@
 #include <fcntl.h>
 #include <stdarg.h>
 
+#include "ptp.h"
 
 #define INFINITE_TIMEOUT (-1)
 #define MAX(a,b)    ((a) > (b) ? (a) : (b))
@@ -32,8 +33,11 @@ void printusage()
 
         "pcat allows you to combine the output from multiple concurrent processes\n"
         "while keeping individual lines intact: each output line is guaranteed to be\n"
-        "an entire line from exactly one input.  The ordering of output lines is\n"
-        "arbitrary; in general, lines from all FILEs will be mixed together.\n\n"
+        "an entire line from exactly one input.  The relative order of lines from\n"
+        "any particular file is preserved (i.e., lines from the same file stay in \n"
+        "order), but lines from all FILEs will be mixed together arbitrarily.\n"
+        "To ensure each output line comes from only one input, pcat will add a\n"
+        "final newline to any file that ends without one.\n"
 
         "  -h,  --help                display this help and exit\n"
       //"  -c,  --continue-on-error   continue processing other FILEs if one has an error\n\n"
@@ -43,20 +47,12 @@ void printusage()
 }
 
 
-/* Print a formatted debugging message to stderr. */
-void debug(int level, const char * msg, ...)
-{
-    #ifdef DEBUG
-    va_list args;
-    va_start(args, msg);
-    vfprintf(stderr, msg, args);
-    #endif
-}
 
 
 /*
  * Read data from file descriptor fd, print whole lines to stdout, save any
- * trailing partial line in buf.
+ * trailing partial line in buf.  If we don't yet have a whole line, nothing
+ * is printed and the data is buffered.
  *
  * We want to print only whole lines to stdout.  Lines can be arbitrarily long,
  * and we may not get a whole line in one read().  So, we have to manage a
@@ -64,7 +60,7 @@ void debug(int level, const char * msg, ...)
  *
  * buf will always hold the last partial line read, starting at offset 0.  The last
  * partial line is bufpos bytes long (it can be zero, i.e., no partial line).  We
- * try to read readbufsize bytes into buf starting at bufpos; if it won't fit,
+ * try to read readsize bytes into buf starting at bufpos; if it won't fit,
  * we double the size of buf until it does.  Once we've read in the data,
  * we scan it in reverse, looking for the last newline.  We print everything up to
  * and including the last newline.  We then copy any trailing partial line to the
@@ -74,11 +70,11 @@ void debug(int level, const char * msg, ...)
  * We pass pointers to buf, bufsize, and bufpos because this routine modifies
  * them.
  */
-int print_lines(int fd, size_t readbufsize, char ** buf, size_t * bufsize, size_t * bufpos)
+int print_lines(int fd, size_t readsize, char ** buf, size_t * bufsize, size_t * bufpos)
 {
-    if (*bufsize - *bufpos < readbufsize)
+    if (*bufsize - *bufpos < readsize)
     {
-        while (*bufsize - *bufpos < readbufsize)
+        while (*bufsize - *bufpos < readsize)
             *bufsize *= 2;
 
         *buf = realloc(*buf, *bufsize);
@@ -95,7 +91,7 @@ int print_lines(int fd, size_t readbufsize, char ** buf, size_t * bufsize, size_
         return 1;
     if (bytesread == 0)       // EOF
     {
-        if (*bufpos > 0 && write(fileno(stdout), *buf, *bufpos) < 0)
+        if (*bufpos > 0 && write(fileno(stdout), *buf, *bufpos) < *bufpos)
         {
             perror("pcat: write()");
             exit(1);
@@ -108,7 +104,7 @@ int print_lines(int fd, size_t readbufsize, char ** buf, size_t * bufsize, size_
     if (last_newline != NULL)
     {
         char * partial_line = last_newline + 1;
-        if (write(fileno(stdout), *buf, partial_line - *buf) < 0)
+        if (write(fileno(stdout), *buf, partial_line - *buf) < partial_line - *buf)
         {
             perror("pcat: write()");
             exit(1);
@@ -128,7 +124,7 @@ int print_lines(int fd, size_t readbufsize, char ** buf, size_t * bufsize, size_
 
 /* Basic idea: open each given file for reading, then loop poll()ing,
  * writing each file's lines to stdout.  Since we may not get a complete
- * line at a time, we have to buffer until we see a newline.
+ * line at a time, we have to buffer each file until we see a newline.
  */
 int main(int argc, char* argv[])
 {
@@ -150,7 +146,7 @@ int main(int argc, char* argv[])
 
     if (fds == NULL || buffers == NULL || buffer_sizes == NULL || buffer_positions == NULL)
     {
-        perror("Error allocating memory");
+        perror("pcat: Error allocating memory");
         exit(1);
     }
 
@@ -167,7 +163,7 @@ int main(int argc, char* argv[])
         fds[f].events = POLLIN;
         if (fds[f].fd < 0)
         {
-            fprintf(stderr, "Error opening '%s'", filename);
+            fprintf(stderr, "pcat: Error opening '%s'", filename);
             perror("");
             exit(1);
         }
@@ -176,7 +172,7 @@ int main(int argc, char* argv[])
         buffers[f] = calloc(initial_buffer_size, sizeof(char));
         if (buffers[f] == NULL)
         {
-            perror("Error allocating buffer");
+            perror("pcat: Error allocating buffer");
             exit(1);
         }
     }
@@ -228,7 +224,7 @@ int main(int argc, char* argv[])
                     free(buffers[f]);
                     if (result > 0)        	// Error
                     {
-                        fprintf(stderr, "Error reading from fd %d.\n", fds[f].fd);
+                        fprintf(stderr, "pcat: Error reading from fd %d.\n", fds[f].fd);
                     }
                     if (close(fds[f].fd) != 0)
                     {
@@ -240,7 +236,7 @@ int main(int argc, char* argv[])
             }
             else if (fds[f].revents != 0)
             {
-                fprintf(stderr, "Unknown result from poll on fd %d: %d\n", f, fds[f].revents);
+                fprintf(stderr, "pcat: Unknown result from poll on fd %d: %d\n", f, fds[f].revents);
                 exit(1);
             }
         }
