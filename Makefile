@@ -5,7 +5,7 @@
 # available in the accompanying file LICENSE.txt.
 
 CC=gcc
-CFLAGS=-Wall -std=c99 -O3
+CFLAGS=-Wall -Wextra -pedantic -std=c99 -O3
 
 .PHONY: clean all test
 

@@ -7,7 +7,7 @@
 
  Hash lines from stdin to multiple files, such that the same line always
  goes to the same file.
- ****************************************************************************/
+*****************************************************************************/
 
 #define _XOPEN_SOURCE 700        // For getline(3)
 
@@ -60,7 +60,7 @@ uint32_t hash(const void * buf, size_t len)
 {
     uint32_t hashcode;
 
-    if (len > INT_MAX)
+    if (len > (size_t) INT_MAX)
     {
         fprintf(stderr, "Maximum line length (%d) exceeded: %zu.\n", INT_MAX, len);
         exit(1);
@@ -85,24 +85,25 @@ unsigned int hash2filenum(uint32_t hashcode, unsigned int numfiles)
  */
 void split_lines_to_files(char * buf, size_t buflen, void * info)
 {
-    const char * line = buf;
-    const char * bufend = buf + buflen;
-    const char * newline;
+    const char * line = buf;                // Start of current line
+    const char * newline;                   // End of current line
+    const char * bufend = buf + buflen;     // (One past) end of buffer
     struct fileinfo fileinfo = *(struct fileinfo *) info;
 
     assert(buflen > 0);
     while (line < bufend)
     {
-        newline = memchr(line, '\n', bufend - line);
+        // Find end of line (or buffer), hash from line (start) to newline (end), excluding the \n
+        newline = memchr(line, '\n', (size_t) (bufend - line));
         if (newline == NULL)
-            newline = bufend - 1;       // We add one later when writing to include the newline in the usual case.
+            newline = bufend - 1;       // Usually we include the newline, but if there isn't one, we don't want to overstep
         uint32_t hashcode = hash(line, newline - line);
 
         if (fileinfo.numfiles > 0)
         {
             unsigned int filenum = hash2filenum(hashcode, fileinfo.numfiles);
             // fwrite(3) is faster than write(2) here because we're only writing a line at a time, so fwrite's buffering helps.
-            if (fwrite(line, 1, newline - line + 1, fileinfo.files[filenum]) < newline - line + 1)
+            if (fwrite(line, 1, newline - line + 1, fileinfo.files[filenum]) < (size_t) (newline - line + 1))
             {
                 fprintf(stderr, "hsplit: Error writing to file %d", filenum);
                 perror("");
@@ -187,7 +188,7 @@ int main(int argc, char * argv[])
 
     /* Close files and clean up. */
     process_lines_cleanup(&ctx);
-    for (int f = 0 ; f < fileinfo.numfiles ; f++)
+    for (unsigned int f = 0 ; f < fileinfo.numfiles ; f++)
     {
         if (fclose(fileinfo.files[f]) != 0)
         {

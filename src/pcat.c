@@ -17,7 +17,8 @@
 #include <sys/types.h>
 #include <sys/stat.h>
 #include <fcntl.h>
-#include <stdarg.h>
+#include <assert.h>
+#include <limits.h>
 
 #include "ptp.h"
 
@@ -32,111 +33,48 @@ void printusage()
         "Read FILE(s) in parallel and write whole lines to standard output.\n\n"
 
         "pcat allows you to combine the output from multiple concurrent processes\n"
-        "while keeping individual lines intact: each output line is guaranteed to be\n"
+        "while keeping whole lines intact: each output line is guaranteed to be\n"
         "an entire line from exactly one input.  The relative order of lines from\n"
         "any particular file is preserved (i.e., lines from the same file stay in \n"
-        "order), but lines from all FILEs will be mixed together arbitrarily.\n"
+        "order), but lines from each FILE will be mixed together arbitrarily.\n"
         "To ensure each output line comes from only one input, pcat will add a\n"
         "final newline to any file that ends without one.\n"
 
         "  -h,  --help                display this help and exit\n"
-      //"  -c,  --continue-on-error   continue processing other FILEs if one has an error\n\n"
+        "  -c,  --continue-on-error   continue processing other FILEs if one has an error\n\n"
 
         "With no FILE, or when FILE is -, read standard input (like cat(1)).\n\n",
         stderr);
 }
 
 
-
-
-/*
- * Read data from file descriptor fd, print whole lines to stdout, save any
- * trailing partial line in buf.  If we don't yet have a whole line, nothing
- * is printed and the data is buffered.
- *
- * We want to print only whole lines to stdout.  Lines can be arbitrarily long,
- * and we may not get a whole line in one read().  So, we have to manage a
- * growable buffer.
- *
- * buf will always hold the last partial line read, starting at offset 0.  The last
- * partial line is bufpos bytes long (it can be zero, i.e., no partial line).  We
- * try to read readsize bytes into buf starting at bufpos; if it won't fit,
- * we double the size of buf until it does.  Once we've read in the data,
- * we scan it in reverse, looking for the last newline.  We print everything up to
- * and including the last newline.  We then copy any trailing partial line to the
- * beginning of the buffer.
- *
- * print_lines() returns zero if everything went OK, -1 on EOF, and 1 on error.
- * We pass pointers to buf, bufsize, and bufpos because this routine modifies
- * them.
- */
-int print_lines(int fd, size_t readsize, char ** buf, size_t * bufsize, size_t * bufpos)
+/** write() buf to stdout. */
+void writelines(char * buf, size_t buflen, __attribute__ ((unused)) void * info)
 {
-    if (*bufsize - *bufpos < readsize)
+    assert(buflen > 0);
+    assert(buflen < SSIZE_MAX);
+    if (write(fileno(stdout), buf, buflen) < (ssize_t) buflen)
     {
-        while (*bufsize - *bufpos < readsize)
-            *bufsize *= 2;
-
-        *buf = realloc(*buf, *bufsize);
-        if (*buf == NULL)
-        {
-            perror("pcat: realloc");
-            exit(1);
-        }
+        perror("pcat: write()");
+        exit(1);
     }
 
-    ssize_t bytesread = read(fd, *buf + *bufpos, *bufsize - *bufpos);
-    debug(1, "read on fd %d returned %d\n", fd, bytesread);
-    if (bytesread < 0)        // Error
-        return 1;
-    if (bytesread == 0)       // EOF
+    // If last line has no newline, write one.
+    if (buf[buflen - 1] != '\n' && write(fileno(stdout), "\n", 1) < 1)
     {
-        if (*bufpos > 0 && write(fileno(stdout), *buf, *bufpos) < *bufpos)
-        {
-            perror("pcat: write()");
-            exit(1);
-        }
-        *bufpos = 0;
-        return -1;
+        perror("pcat: write()");
+        exit(1);
     }
-
-    char * last_newline = memrchr(*buf + *bufpos, '\n', (size_t) bytesread);
-    if (last_newline != NULL)
-    {
-        char * partial_line = last_newline + 1;
-        if (write(fileno(stdout), *buf, partial_line - *buf) < partial_line - *buf)
-        {
-            perror("pcat: write()");
-            exit(1);
-        }
-        size_t bytes_remaining = *buf + *bufpos + bytesread - partial_line;
-        memmove(*buf, partial_line, bytes_remaining);
-        *bufpos = bytes_remaining;
-    }
-    else        // No newline found
-    {
-        *bufpos += bytesread;
-    }
-
-    return 0;
 }
 
 
 /* Basic idea: open each given file for reading, then loop poll()ing,
  * writing each file's lines to stdout.  Since we may not get a complete
- * line at a time, we have to buffer each file until we see a newline.
- */
-int main(int argc, char* argv[])
+ * line at a time, we have to buffer each file until we see a newline.  */
+int main(int argc, char * argv[])
 {
     int continue_on_errors = 0;
     unsigned int first_filename_arg = 1;
-    unsigned int numfiles = MAX(argc - first_filename_arg, 1);        	// If no filenames given, still have stdin
-    unsigned int initial_buffer_size = 4096;
-    struct pollfd * fds = calloc(numfiles, sizeof(struct pollfd));
-    char ** buffers = calloc(numfiles, sizeof(char *));                	// Holds trailing partial line for each input
-    size_t * buffer_sizes = calloc(numfiles, sizeof(size_t));        	// Size of each input buffer
-    size_t * buffer_positions = calloc(numfiles, sizeof(size_t));    	// Length of partial line in each buffer
-
 
     if (argc == 2 && (strcmp(argv[1], "--help") == 0 || strcmp(argv[1], "-h") == 0))
     {
@@ -144,11 +82,15 @@ int main(int argc, char* argv[])
         exit(0);
     }
 
-    if (fds == NULL || buffers == NULL || buffer_sizes == NULL || buffer_positions == NULL)
+    if (argc > 1 && strcmp(argv[1], "-c") == 0)
     {
-        perror("pcat: Error allocating memory");
-        exit(1);
+        continue_on_errors = 1;
+        first_filename_arg = 2;
     }
+
+    unsigned int numfiles = MAX(argc - first_filename_arg, 1);          // If no filenames given, still have stdin
+    process_lines_context contexts[numfiles];                           // C99 variable-length arrays -- ooh-la-la!
+    struct pollfd pollfds[numfiles];
 
     /* Open files; set up poll structs and buffers. */
     debug(1, "opening %d file(s)\n", numfiles);
@@ -156,33 +98,31 @@ int main(int argc, char* argv[])
     {
         const char * filename = argc > 1 ? argv[first_filename_arg + f] : "-";
         if (strcmp(filename, "-") == 0)
-            fds[f].fd = fileno(stdin);
+            pollfds[f].fd = fileno(stdin);
         else
-            fds[f].fd = open(filename, O_RDONLY);
-        debug(1, "open(\"%s\") as fd %d\n", filename, fds[f].fd);
-        fds[f].events = POLLIN;
-        if (fds[f].fd < 0)
+            pollfds[f].fd = open(filename, O_RDONLY);
+        debug(1, "open(\"%s\") as fd %d\n", filename, pollfds[f].fd);
+        pollfds[f].events = POLLIN;
+        if (pollfds[f].fd < 0)
         {
             fprintf(stderr, "pcat: Error opening '%s'", filename);
             perror("");
             exit(1);
         }
 
-        buffer_sizes[f] = initial_buffer_size;
-        buffers[f] = calloc(initial_buffer_size, sizeof(char));
-        if (buffers[f] == NULL)
+        if (process_lines_init(contexts + f, pollfds[f].fd, writelines, NULL) != 0)
         {
-            perror("pcat: Error allocating buffer");
+            perror("pcat: Error initializing processing context");
             exit(1);
         }
     }
 
-    /* Loop polling files until we've finished reading them all. */
+    /* Loop polling files, writing data to stdout, until we've finished reading them all. */
     unsigned int numfiles_remaining = numfiles;
     while (numfiles_remaining > 0)
     {
         debug(2, "polling %d file(s)\n", numfiles_remaining);
-        unsigned int numready = poll(fds, numfiles, INFINITE_TIMEOUT);
+        int numready = poll(pollfds, numfiles, INFINITE_TIMEOUT);
         debug(2, "poll gave %d ready file(s)\n", numready);
 
         if (numready == 0)
@@ -196,37 +136,41 @@ int main(int argc, char* argv[])
             exit(1);
         }
 
+        // Loop reading ready files, writing input to stdout.
         for (unsigned int f = 0 ; f < numfiles ; f++)
         {
-            if (!fds[f].events)        // If we're not listening for this file, skip it.
+            if (!pollfds[f].events)        // If we're not listening for this file, skip it.
                 continue;
-            if (fds[f].revents & (POLLERR | POLLNVAL))        // Error
+            if (pollfds[f].revents & (POLLERR | POLLNVAL))        // Error
             {
-                fds[f].events = 0;
+                pollfds[f].events = 0;
                 numfiles_remaining--;
                 fprintf(stderr, "pcat: %s%s%spolling fd %d.\n",
-                		fds[f].revents & POLLERR ? "POLLERR " : "",
-                		fds[f].revents & POLLHUP ? "POLLHUP " : "",
-                		fds[f].revents & POLLNVAL ? "POLLNVAL " : "",
-            			fds[f].fd);
-                free(buffers[f]);
+                		pollfds[f].revents & POLLERR ? "POLLERR " : "",
+                		pollfds[f].revents & POLLHUP ? "POLLHUP " : "",
+                		pollfds[f].revents & POLLNVAL ? "POLLNVAL " : "",
+            			pollfds[f].fd);
+                process_lines_cleanup(contexts + f);
                 if (!continue_on_errors)
                     exit(1);
             }
             // On Linux and Solaris, pipes give POLLHUP instead of POLLIN on EOF, so we have to check for both.
-            else if (fds[f].revents & (POLLIN | POLLHUP))        // Data or EOF available
+            else if (pollfds[f].revents & (POLLIN | POLLHUP))        // Data or EOF available
             {
-                int result = print_lines(fds[f].fd, initial_buffer_size, &buffers[f], &buffer_sizes[f], &buffer_positions[f]);
+                debug(3, "processing data from fd %d\n", pollfds[f].fd);
+                int result = process_lines(contexts + f);
                 if (result != 0)        	// EOF or Error
                 {
-                    fds[f].events = 0;
+                    pollfds[f].events = 0;
                     numfiles_remaining--;
-                    free(buffers[f]);
+                    debug(2, "cleaning up fd %d: got %d from process_lines\n", pollfds[f].fd, result);
+                    process_lines_cleanup(contexts + f);
                     if (result > 0)        	// Error
                     {
-                        fprintf(stderr, "pcat: Error reading from fd %d.\n", fds[f].fd);
+                        fprintf(stderr, "pcat: Error reading from fd %d.\n", pollfds[f].fd);
                     }
-                    if (close(fds[f].fd) != 0)
+                    debug(2, "closing fd %d\n", pollfds[f].fd);
+                    if (close(pollfds[f].fd) != 0)
                     {
                         perror("pcat: close()");
                         if (!continue_on_errors)
@@ -234,17 +178,13 @@ int main(int argc, char* argv[])
                     }
                 }
             }
-            else if (fds[f].revents != 0)
+            else if (pollfds[f].revents != 0)
             {
-                fprintf(stderr, "pcat: Unknown result from poll on fd %d: %d\n", f, fds[f].revents);
+                fprintf(stderr, "pcat: Unknown result from poll on fd %d: %d\n", f, pollfds[f].revents);
                 exit(1);
             }
         }
     }
-    free(buffer_positions);
-    free(buffer_sizes);
-    free(buffers);
-    free(fds);
 
     debug(1, "Success.\n");
     return 0;

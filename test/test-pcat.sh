@@ -52,6 +52,27 @@ done
 for ((len=0; len < $max_line_len; len++)); do printf '%*s\n' $len; done | "$pcat" | gzip > "$output"
 for ((len=0; len < $max_line_len; len++)); do printf '%*s\n' $len; done | "$pcat" | cmp - <(zcat "$output")
 
+# Test that files that don't end with a newline get one
+for ((f=0; f < $nfiles; f++)); do
+    tr -cd '[:alnum:]' < /dev/urandom | dd bs=1 count=$RANDOM 2>/dev/null >> "${files[$f]}"
+    [[ `tail -c1 "${files[$f]}"` != '\n' ]]     # Just to be sure ;)
+done
+"$pcat" "${files[@]}" > "$output"
+for ((f=0; f < $nfiles; f++)); do
+    echo >> "${files[$f]}"
+done
+cmp <(sort "${files[@]}") <(sort "$output") 
+
+# Test that lines from any particular file maintain their original order.
+for ((f=0; f < $nfiles; f++)); do
+    sed -i "s/^/==$f== /" "${files[$f]}"     # Assumes '=' does not already occur in files
+done
+"$pcat" "${files[@]}" > "$output"
+cmp <(sort "${files[@]}") <(sort "$output") 
+for ((f=0; f < $nfiles; f++)); do
+    cmp <(grep "^==$f==" "$output") "${files[$f]}" 
+done
+
 # Test really long lines, and binary zeros.
 nlines=5
 for ((n=0 ; n < $nlines ; n++)); do 
@@ -61,6 +82,7 @@ for ((n=0 ; n < $nlines ; n++)); do
 done > "${files[0]}"
 "$pcat" "${files[0]}" > "$output"
 cmp <(sort "${files[0]}") <(sort "$output")
+
 
 # Clean up.
 rm "${files[@]}" "$output"
